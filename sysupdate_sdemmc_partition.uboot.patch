@@ -1,0 +1,888 @@
+diff --git a/board/freescale/mx6advantech/mx6advantech.c b/board/freescale/mx6advantech/mx6advantech.c
+index f079381..adac0b8 100755
+--- a/board/freescale/mx6advantech/mx6advantech.c
++++ b/board/freescale/mx6advantech/mx6advantech.c
+@@ -971,6 +971,49 @@ int board_ehci_power(int port, int on)
+ }
+ #endif
+ 
++///////////////////   forebc-rc01  /////////////////////////
++#ifdef CONFIG_ADV_MISC_IO_INIT
++static iomux_v3_cfg_t const adv_misc_io_pads[] = {
++	MX6_PAD_NANDF_CS0__GPIO6_IO11,
++	MX6_PAD_NANDF_CS2__GPIO6_IO15| MUX_PAD_CTRL(PAD_CTL_ODE),   /*ebc-rc01  open drian*/ 
++	MX6_PAD_NANDF_CS1__GPIO6_IO14,
++	MX6_PAD_NANDF_CS3__GPIO6_IO16,
++	MX6_PAD_EIM_CS0__GPIO2_IO23| MUX_PAD_CTRL(PAD_CTL_PUS_100K_UP),   /* input , pull up 100K*/
++	MX6_PAD_EIM_A25__GPIO5_IO02| MUX_PAD_CTRL(PAD_CTL_PUS_100K_UP),	/* input , pull up 100K*/
++};
++static void adv_misc_io_setup(void)
++{
++	// Setup  the misc io pinmux;
++	imx_iomux_v3_setup_multiple_pads(adv_misc_io_pads, ARRAY_SIZE(adv_misc_io_pads));
++	/* N_RST Pull High*/
++	gpio_request(IMX_GPIO_NR(6, 11), "N_RST");
++	gpio_direction_output(IMX_GPIO_NR(6, 11), 1);
++	gpio_free(IMX_GPIO_NR(6, 11));
++
++	/* Boot0_stm32  Low, but it has none gate, so we set to 1 */
++	gpio_request(IMX_GPIO_NR(6, 15), "BOOT0");
++	gpio_direction_output(IMX_GPIO_NR(6, 15), 1);
++	gpio_free(IMX_GPIO_NR(6, 15));
++
++	/* P66 & P65 */
++	gpio_request(IMX_GPIO_NR(2, 23), "STM32_P66");
++	gpio_direction_input(IMX_GPIO_NR(2, 23));
++	gpio_free(IMX_GPIO_NR(2, 23));
++	gpio_request(IMX_GPIO_NR(5, 2), "STM32_P65");
++	gpio_direction_input(IMX_GPIO_NR(5, 2));
++	gpio_free(IMX_GPIO_NR(5, 2));
++	/*P96 & P95*/
++	gpio_request(IMX_GPIO_NR(6, 14), "STM32_P96");
++	gpio_direction_output(IMX_GPIO_NR(6, 14), 0);
++	gpio_free(IMX_GPIO_NR(6, 14));
++	gpio_request(IMX_GPIO_NR(6, 16), "STM32_P95");
++	gpio_direction_output(IMX_GPIO_NR(6, 16), 0);
++	gpio_free(IMX_GPIO_NR(6, 16));	
++}
++#endif /* CONFIG_ADV_MISC_IO_INIT */
++////////////////////////  End //////////////////////////////
++
++
+ int board_early_init_f(void)
+ {
+ 	setup_iomux_uart();
+@@ -989,6 +1032,9 @@ int board_early_init_f(void)
+         setup_sata();
+ #endif
+ 
++#ifdef CONFIG_ADV_MISC_IO_INIT
++		adv_misc_io_setup();
++#endif
+ 	return 0;
+ }
+ 
+diff --git a/cmd/Kconfig b/cmd/Kconfig
+old mode 100644
+new mode 100755
+index 2ed0263..212408e
+--- a/cmd/Kconfig
++++ b/cmd/Kconfig
+@@ -347,6 +347,12 @@ config CMD_USB
+ 	help
+ 	  USB support.
+ 
++config CMD_SYSUPDATE
++	bool "sysupdate"
++	select SYS_UPDATE
++	help
++	  sysupdate support.
++
+ config CMD_FPGA
+ 	bool "fpga"
+ 	default y
+diff --git a/cmd/Makefile b/cmd/Makefile
+old mode 100644
+new mode 100755
+index 67143fd..375d76d
+--- a/cmd/Makefile
++++ b/cmd/Makefile
+@@ -133,6 +133,7 @@ obj-$(CONFIG_CMD_LZMADEC) += lzmadec.o
+ endif
+ 
+ obj-$(CONFIG_CMD_USB) += usb.o
++obj-$(CONFIG_CMD_SYSUPDATE) += sysupdate.o
+ obj-$(CONFIG_CMD_FASTBOOT) += fastboot.o
+ obj-$(CONFIG_CMD_FS_UUID) += fs_uuid.o
+ 
+diff --git a/cmd/sysupdate.c b/cmd/sysupdate.c
+new file mode 100755
+index 0000000..efa9433
+--- /dev/null
++++ b/cmd/sysupdate.c
+@@ -0,0 +1,74 @@
++/*
++ * (C) Copyright 2018
++ * Chang.Qing
++ *
++ * SPDX-License-Identifier:	GPL-2.0+
++ */
++#include <common.h>
++#include <command.h>
++#include <console.h>
++#include <fs.h>
++#include <adv_common.h>
++
++static int sys_update_status =0;
++static int do_check_sysupdate_status(void)
++{
++	if(sys_update_status >= 0)
++		return sys_update_status == 0 ? 0 : 1 ; 
++
++	return 1;
++}
++
++static int do_sysupdate(cmd_tbl_t *cmdtp, int flag, int argc, char * const argv[])
++{
++	char *file = NULL;
++	char *dev_part_str = "0:1";
++	int fstype = FS_TYPE_EXT;
++	int ret;
++	
++	if (argc < 2)
++		return CMD_RET_USAGE;
++
++	if (argc > 2){
++		dev_part_str = argv[2];
++		if(argc > 3){
++			if (strncmp(argv[3], "fat", 3) == 0)
++				fstype = FS_TYPE_FAT;	
++			else
++				/* Currently, we just support 2 kinds fs type*/
++				fstype = FS_TYPE_EXT;
++
++			if(argc > 4){
++				file = argv[4];
++			}
++		}
++	}
++
++	/* update the system image from usb to emmc */
++	if (strncmp(argv[1], "usb", 3) == 0) {
++		ret = do_udisk2emmc_update(file, dev_part_str, fstype);
++		sys_update_status = ret;
++		return  ret < 0 ? 1 : 0;
++	}
++	/* update the system image from sd to emmc */
++	if (strncmp(argv[1], "sd", 2) == 0) {
++		ret =do_sdcard2emmc_update(file, dev_part_str , fstype);
++		sys_update_status = ret;
++		return  ret < 0 ? 1 : 0;
++	}
++	/* Since the command just only return 2 kinds state, for 3 jinds
++		status, we Add a command to match. */
++	if (strncmp(argv[1], "test", 4) == 0) {
++		return  do_check_sysupdate_status();
++	}
++
++	return CMD_RET_USAGE;
++}
++
++U_BOOT_CMD(
++	sysupdate, 5, 1, do_sysupdate,
++	"update system image to emmc",
++	"sysupdate usb [dev:part [fstype [file] ] ] - update system from usb\r\n"
++	"sysupdate sdcard [dev:part  [fstype [file] ] ] - update system from sdcard\r\n"
++	"sysupdate test  - after the above command and test the sysupdate status"
++);
+diff --git a/common/Kconfig b/common/Kconfig
+old mode 100644
+new mode 100755
+index 067545d..dd1abcf
+--- a/common/Kconfig
++++ b/common/Kconfig
+@@ -124,3 +124,8 @@ config CONSOLE_RECORD_IN_SIZE
+ 	  tstc() and getc() will use this in preference to real device input.
+ 	  The buffer is allocated immediately after the malloc() region is
+ 	  ready.
++
++config SYS_UPDATE
++	bool "system update"
++	help
++	  Support update system from udisk and SD card!
+diff --git a/common/Makefile b/common/Makefile
+index 5c882c3..184fe0a 100755
+--- a/common/Makefile
++++ b/common/Makefile
+@@ -32,6 +32,7 @@ obj-$(CONFIG_DISPLAY_BOARDINFO) += board_info.o
+ obj-$(CONFIG_DISPLAY_BOARDINFO_LATE) += board_info.o
+ 
+ obj-$(CONFIG_CMD_BOOTM) += bootm.o bootm_os.o
++obj-$(CONFIG_SYS_UPDATE) += sys_update.o
+ 
+ # environment
+ obj-y += env_attr.o
+diff --git a/common/board_r.c b/common/board_r.c
+old mode 100644
+new mode 100755
+index 592d78b..f1631f4
+--- a/common/board_r.c
++++ b/common/board_r.c
+@@ -974,7 +974,13 @@ int board_set_boot_device(void)
+ 			/* booting from Carrier SD*/
+ 			printf("booting from Carrier SD\n");
+ 			setenv("mmcdev", MK_STR(CONFIG_CARRIERSD_DEV_NUM));
++#ifdef CONFIG_FIX_MMCSD_BOOT
++			sprintf(buf, CONFIG_FIX_SDMMC_ROOT);
++			setenv("mmcpart", CONFIG_FIX_SDMMC_BOOTPART);
++#else
+ 			sprintf(buf, "/dev/mmcblk2p2 rootwait rw");
++#endif
++
+ 			setenv("mmcroot",buf);
+                         break;
+ #endif
+diff --git a/common/spl/spl_mmc_advantech.c b/common/spl/spl_mmc_advantech.c
+old mode 100644
+new mode 100755
+index 67c58f7..8a86d67
+--- a/common/spl/spl_mmc_advantech.c
++++ b/common/spl/spl_mmc_advantech.c
+@@ -34,6 +34,38 @@ static int spl_mmc_check_crc(unsigned int dev,struct mmc *mmc)
+ #ifdef CONFIG_SPL_FAT_SUPPORT
+ 	/* Needs to implement later */
+ #else
++#ifdef  CONFIG_FIX_ADVLD_LOAD_ADDR
++	u32 n;
++	/* read crc file */
++	char tag[512];
++	char crc[512];
++
++	n = mmc->block_dev.block_read(&mmc->block_dev, CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_CRC_SECTOR, 1, (void *) 0x22100000);
++	if(n != 1)
++		return 1;
++
++	memcpy(tag, (void *) 0x22100000, 512);
++	//tag[9] = '\0';
++	//printf("crc file %s\n", tag);
++
++	/* make uboot crc */
++	n = mmc->block_dev.block_read(&mmc->block_dev, CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR, CONFIG_SYS_U_BOOT_MAX_SIZE_SECTORS, (void *) 0x22000000);
++	if(n != 0x4b0)
++		return 1;
++
++	*(int *)0x21f00000 = crc32 (0, (const uchar *) 0x22000000, CONFIG_SYS_U_BOOT_MAX_SIZE_SECTORS*512);
++	sprintf(crc, "%08x", *(int *)0x21f00000);
++	//crc[9] = '\0';
++	//printf("uboot crc %s\n", crc);
++
++	/* verrify crc */
++	if(memcmp(tag, crc, 8))
++	{
++		printf("spl: mmc dev %d - crc error\n", dev);
++		return 1;
++	}
++	
++#else
+ 	u32 n;
+ 	/* read crc file */
+ 	char tag[512];
+@@ -64,6 +96,7 @@ static int spl_mmc_check_crc(unsigned int dev,struct mmc *mmc)
+ 		return 1;
+ 	}
+ #endif
++#endif
+ 	return 0;
+ }
+ 
+diff --git a/common/sys_update.c b/common/sys_update.c
+new file mode 100755
+index 0000000..288d6d2
+--- /dev/null
++++ b/common/sys_update.c
+@@ -0,0 +1,274 @@
++/*
++ * (C) Copyright 2018
++ * Chang.Qing
++ *
++ * SPDX-License-Identifier:	GPL-2.0+
++ */
++#include <common.h>
++#include <asm/u-boot.h>
++#include <errno.h>
++#include <usb.h>
++#include <fat.h>
++#include <fs.h>
++#include <mmc.h>
++
++#ifndef CONFIG_SYS_EMMC_IMAGE_NAME
++#define CONFIG_SYS_EMMC_IMAGE_NAME  "emmc_install.img"
++#endif
++#ifndef CONFIG_NUM_BLKS_PER_READ  
++#define  CONFIG_NUM_BLKS_PER_READ  2048UL 
++#endif
++#ifndef CONFIG_IMAGE_LOAD_ADDR  
++#define CONFIG_IMAGE_LOAD_ADDR  CONFIG_SYS_LOAD_ADDR
++#endif
++
++#define CONFIG_NUM_BYTES_PER_READ 	((CONFIG_NUM_BLKS_PER_READ)*512UL)
++
++
++struct fsblk_info{
++	char *dev_type;
++	char *dev_part;
++	int fstype;
++};
++
++static loff_t file_read(struct fsblk_info *blkinfo, const char *file, ulong addr, loff_t offset, loff_t len)
++{
++	unsigned long time;
++	int ret;
++	loff_t len_read = 0;
++
++	if(!blkinfo)	
++		return -1;
++
++	if (fs_set_blk_dev(blkinfo->dev_type, blkinfo->dev_part, blkinfo->fstype))
++		return -2;
++
++	//time = get_timer(0);
++	ret = fs_read(file, addr, offset, len, &len_read);
++	//time = get_timer(time);
++	if (ret < 0)
++		return ret;
++
++	printf(".");
++	// printf("%llu bytes read in %lu ms", len_read, time);
++	return len_read;
++}
++
++static loff_t file_size(struct fsblk_info *blkinfo, const char *file)
++{
++	loff_t size = 0;
++	
++	if(!blkinfo)
++		return 0;		
++
++	if (fs_set_blk_dev(blkinfo->dev_type, blkinfo->dev_part, blkinfo->fstype))
++		return 0;
++
++	if (fs_size(file, &size) < 0)
++		return 0;
++
++	return size;
++}
++/*
++* Init the specified mmc device.
++*/
++static struct mmc *init_mmc_device(int dev, bool force_init)
++{
++	struct mmc *mmc;
++
++	mmc = find_mmc_device(dev);
++	if (!mmc) {
++		printf("no mmc device at slot %x\n", dev);
++		return NULL;
++	}
++	if (force_init)
++		mmc->has_init = 0;
++	if (mmc_init(mmc))
++		return NULL;
++	return mmc;
++}
++
++/*
++* If there is a emmc image , we can use this function write the image file to emmc
++* block device. it's like the linux command dd. 
++* but it's dedicated to the system update. At same time, the emmc.img should  coexists with
++* the advantech bootloader. uboot_crc.bin.crc and uboot_crc.bin.crc. Otherwise, the system 
++* update will Occur fatal error, Since the system can't boot up without bootloader. 
++*/
++static int 
++do_emmc_image_update(char *devtype, char *file, char *dev_part_str, int fstype, int  mmcdev)
++{
++	int err = 0;
++	int stor_curr_dev;
++	block_dev_desc_t *stor_dev;
++	loff_t offset = 0, actlen;
++	u32 blk, n;
++	struct mmc *mmc;
++	struct fsblk_info fat_blk_info;
++	loff_t size = 0;
++
++	if(!file)
++		file = CONFIG_SYS_EMMC_IMAGE_NAME;
++
++	if(!devtype)
++		devtype = "usb";
++
++	if (strncmp(devtype, "usb", 3) == 0) {
++		/* 1. Init the USB bus & USB device */
++		usb_stop();
++		err = usb_init();
++		if (err) {
++			printf("%s: usb init failed: err - %d\n", __func__, err);
++			goto error;
++		}
++
++#ifdef CONFIG_USB_STORAGE
++		/* try to recognize storage devices immediately 
++	  	Find the first storage block device. */
++		stor_curr_dev = usb_stor_scan(1);
++		if(stor_curr_dev < 0){
++			printf("No available usb storage\r\n");	
++			goto error;
++		}		
++		stor_dev = usb_stor_get_dev(stor_curr_dev);
++#endif
++		/*it make sure the devtype is usb*/
++		devtype = "usb";
++
++	}else if(strncmp(devtype, "sdcard", 6) == 0){
++		/* We don't need to init the MMC device any more,
++			since the fs_set_blk_dev will init the mmc*/
++		devtype = "mmc";
++	}else{
++		printf("#! No avaliable storage device!\n");
++		goto error;
++	}
++	
++	/* 2. Init the eMMC device */
++	mmc = init_mmc_device(mmcdev, false);
++	if (!mmc){
++		printf("Error: No avaliable MMC device!\n");
++		goto error;
++	}
++	if (mmc_getwp(mmc) == 1) {
++		printf("Error: card is write protected!\n");
++		goto error;
++	}
++
++	/*Check wether the emmc image file existed in partition 0*/
++	if(!file_exists(devtype, dev_part_str, file, fstype)){
++		printf("No available system update image.\r\n");
++		goto error;		
++	}
++
++	memset(&fat_blk_info, 0, sizeof(struct fsblk_info));
++	fat_blk_info.dev_type = devtype;
++	fat_blk_info.dev_part = dev_part_str;
++	fat_blk_info.fstype = fstype;
++	/* Get the total size*/
++	size = file_size(&fat_blk_info, file);
++	if (!size)
++		goto error;		
++
++	/* Read the file and write to the emmc flash*/
++	if(size + CONFIG_NUM_BYTES_PER_READ >= 0xFFFFFFFFUL){
++		printf("File too large!\r\n");
++		goto error;		
++	}
++
++	blk =0;
++	offset = 0;
++	if (strncmp(devtype, "usb", 3) == 0) {
++		devtype ="udisk";
++	}else {
++		devtype ="sdcard";
++	}
++
++	printf("####### Start to update system from %s to emmc flash #######\r\n", devtype);	
++	mask_dbg_msg(1);	//enter the mask state.
++	printf("------- Update %s from %s to emmc flash -------\r\n", file, devtype);
++	while(offset < size ){
++		actlen = file_read(&fat_blk_info, file, \
++						CONFIG_IMAGE_LOAD_ADDR, offset, CONFIG_NUM_BYTES_PER_READ);
++		if(actlen < 0){
++			printf("\r\n#! unexpected read error!\r\n");
++			err = -EIO;	
++			goto fatal_err; 
++		}	
++		
++		n = mmc->block_dev.block_write(&mmc->block_dev, blk, \
++				CONFIG_NUM_BLKS_PER_READ, (void *)CONFIG_IMAGE_LOAD_ADDR);	
++		if(n != CONFIG_NUM_BLKS_PER_READ){
++			printf("\r\n#! unexpected write emmc error!\r\n");	
++			err = -EIO;	
++			goto fatal_err; 
++		}
++
++		offset +=CONFIG_NUM_BYTES_PER_READ;
++		blk+=CONFIG_NUM_BLKS_PER_READ;
++	}
++	printf("\r\n------- [ Update %s Done ] -------\r\n", file);
++
++	printf("------- Update bootloader from %s to emmc flash  -------\r\n", devtype);
++	/* update the uboot crc */	
++	if(file_read(&fat_blk_info, "u-boot_crc.bin.crc", \
++						CONFIG_IMAGE_LOAD_ADDR, 0, 0) <= 0){
++		printf("\r\n#! No availiable u-boot_crc.bin.crc!\r\n");	
++		err = -EIO;
++		goto fatal_err;
++	}
++	n = mmc->block_dev.block_write(&mmc->block_dev, CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_CRC_SECTOR,\
++					 1, (void *)CONFIG_IMAGE_LOAD_ADDR);	
++	if(n != 1){
++		printf("#! unexpected write emmc error!\r\n");	
++		err = -EIO;
++		goto fatal_err;
++	}	
++	
++	/* update the uboot */	
++	actlen = file_read(&fat_blk_info, "u-boot_crc.bin", \
++						CONFIG_IMAGE_LOAD_ADDR, 0, 0);
++	if(actlen <= 0 ){
++		printf("\r\n#! No availiable u-boot_crc.bin !\r\n");	
++		err = -EIO;
++		goto fatal_err;
++	}
++	n = (u32)actlen;  /* Szie << 4GB */
++	n =n/512 +1;
++	actlen = mmc->block_dev.block_write(&mmc->block_dev, CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR,\
++					 n, (void *)CONFIG_IMAGE_LOAD_ADDR);	
++	if(actlen != n){
++		printf("write emmc error!\r\n");	
++		err = -EIO;
++		goto fatal_err;
++	}	
++	printf("\r\n------- [ Update bootloader done! ] -------\r\n");
++	mask_dbg_msg(0);  // exit the mask state
++	printf("####### [System update Successful!] #######\r\n");
++	return 0;
++
++fatal_err:
++	printf("####### [System update Failed!] #######\r\n");
++	printf("#! there are some fatal error caused by above msg！\r\n");
++	printf("#! Please Check over the update image and reset the board！\r\n");
++	printf("#! then, retry to update the system！\r\n");	
++	return err;
++error:
++	return 1;	
++}
++
++/*
++* Copy the system image & bootloader from usb storage to eMMC. 
++*/
++int do_udisk2emmc_update(char *file, char *dev_part_str, int fstype)
++{	
++	return do_emmc_image_update("usb", file, dev_part_str, fstype, CONFIG_UPDATE_EMMC_NUM);
++}
++
++/*
++* Copy the system image & bootloader from sdcard storage to eMMC. 
++*/
++int do_sdcard2emmc_update(char *file, char *dev_part_str, int fstype)
++{	
++	return do_emmc_image_update("sdcard", file, dev_part_str, fstype, CONFIG_UPDATE_EMMC_NUM);
++}
+diff --git a/configs/mx6soloebcrc01a1_512M_defconfig b/configs/mx6soloebcrc01a1_512M_defconfig
+index 5ecead6..d86dfea 100755
+--- a/configs/mx6soloebcrc01a1_512M_defconfig
++++ b/configs/mx6soloebcrc01a1_512M_defconfig
+@@ -4,3 +4,4 @@ CONFIG_ARM=y
+ CONFIG_ARCH_MX6=y
+ CONFIG_TARGET_MX6EBCRC01A1_512M=y
+ CONFIG_CMD_GPIO=y
++CONFIG_CMD_SYSUPDATE=y
+diff --git a/fs/ext4/ext4fs.c b/fs/ext4/ext4fs.c
+old mode 100644
+new mode 100755
+index 258b937..00111a4
+--- a/fs/ext4/ext4fs.c
++++ b/fs/ext4/ext4fs.c
+@@ -64,9 +64,12 @@ int ext4fs_read_file(struct ext2fs_node *node, loff_t pos,
+ 	char *delayed_buf = NULL;
+ 	short status;
+ 
++	if (blocksize <= 0)
++		return -1;
++
+ 	/* Adjust len so it we can't read past the end of the file. */
+-	if (len > filesize)
+-		len = filesize;
++	if (len + pos > filesize)
++		len = (filesize - pos);
+ 
+ 	blockcnt = lldiv(((len + pos) + blocksize - 1), blocksize);
+ 
+@@ -218,8 +221,28 @@ int ext4_read_file(const char *filename, void *buf, loff_t offset, loff_t len,
+ 	int ret;
+ 
+ 	if (offset != 0) {
++#ifdef  CONFIG_EXT4_NZOFFSET_SUPPORT
++		if(offset > 0){
++			ret = ext4fs_open(filename, &file_len);
++			if (ret < 0) {
++				printf("** File not found %s **\n", filename);
++				return -1;
++			}
++
++			if (len == 0)
++				len = file_len;
++			
++			if (ext4fs_root == NULL || ext4fs_file == NULL)
++				return -1;
++
++			return ext4fs_read_file(ext4fs_file, offset, len, buf, len_read);
++		}
++		
++		return -1;	
++#else
+ 		printf("** Cannot support non-zero offset **\n");
+ 		return -1;
++#endif
+ 	}
+ 
+ 	ret = ext4fs_open(filename, &file_len);
+diff --git a/fs/fat/fat.c b/fs/fat/fat.c
+old mode 100644
+new mode 100755
+index 472a63e..89b66f9
+--- a/fs/fat/fat.c
++++ b/fs/fat/fat.c
+@@ -25,7 +25,16 @@ static const int vfat_enabled = 1;
+ #else
+ static const int vfat_enabled = 0;
+ #endif
+-
++#ifdef CONFIG_SYS_UPDATE
++u8  mask_debug = 0;
++void mask_dbg_msg(u8 mask)
++{
++	if(mask)
++		mask_debug = 1;
++	else
++		mask_debug = 0;
++}
++#endif
+ /*
+  * Convert a string to lowercase.
+  */
+@@ -1326,6 +1335,9 @@ int fat_size(const char *filename, loff_t *size)
+ int file_fat_read_at(const char *filename, loff_t pos, void *buffer,
+ 		     loff_t maxsize, loff_t *actread)
+ {
++#ifdef CONFIG_SYS_UPDATE
++	if(!mask_debug)
++#endif	
+ 	printf("reading %s\n", filename);
+ 	return do_fat_read_at(filename, pos, buffer, maxsize, LS_NO, 0,
+ 			      actread);
+diff --git a/fs/fs.c b/fs/fs.c
+old mode 100644
+new mode 100755
+index d123d29..706e404
+--- a/fs/fs.c
++++ b/fs/fs.c
+@@ -23,7 +23,9 @@ DECLARE_GLOBAL_DATA_PTR;
+ static block_dev_desc_t *fs_dev_desc;
+ static disk_partition_t fs_partition;
+ static int fs_type = FS_TYPE_ANY;
+-
++#ifdef CONFIG_SYS_UPDATE
++extern u8  mask_debug;
++#endif
+ static inline int fs_probe_unsupported(block_dev_desc_t *fs_dev_desc,
+ 				      disk_partition_t *fs_partition)
+ {
+@@ -307,6 +309,9 @@ int fs_read(const char *filename, ulong addr, loff_t offset, loff_t len,
+ 	unmap_sysmem(buf);
+ 
+ 	/* If we requested a specific number of bytes, check we got it */
++#ifdef CONFIG_SYS_UPDATE
++	if(!mask_debug)
++#endif
+ 	if (ret == 0 && len && *actread != len)
+ 		printf("** %s shorter than offset + len **\n", filename);
+ 	fs_close();
+diff --git a/include/adv_common.h b/include/adv_common.h
+new file mode 100755
+index 0000000..27ec7ae
+--- /dev/null
++++ b/include/adv_common.h
+@@ -0,0 +1,10 @@
++#ifndef __ADV_COMMON_H_
++#define __ADV_COMMON_H_
++
++#ifdef CONFIG_SYS_UPDATE
++int do_udisk2emmc_update(char *file, char *dev_part_str, int fstype);
++int do_sdcard2emmc_update(char *file, char *dev_part_str, int fstype);
++void mask_dbg_msg(u8 mask);
++#endif
++
++#endif
+diff --git a/include/common.h b/include/common.h
+old mode 100644
+new mode 100755
+diff --git a/include/configs/mx6advantech_common.h b/include/configs/mx6advantech_common.h
+old mode 100644
+new mode 100755
+index 6d070e4..e581e24
+--- a/include/configs/mx6advantech_common.h
++++ b/include/configs/mx6advantech_common.h
+@@ -12,7 +12,7 @@
+ #include "mx6_common.h"
+ #define CONFIG_ADVANTECH
+ /* OTA support */
+-#define CONFIG_ADV_OTA_SUPPORT
++/*#define CONFIG_ADV_OTA_SUPPORT*/
+ /* uncomment for PLUGIN mode support */
+ /* #define CONFIG_USE_PLUGIN */
+ 
+diff --git a/include/configs/mx6ebcrc01.h b/include/configs/mx6ebcrc01.h
+index 544843c..1bab56e 100755
+--- a/include/configs/mx6ebcrc01.h
++++ b/include/configs/mx6ebcrc01.h
+@@ -18,10 +18,25 @@
+ #include "imx6_spl_advantech.h"
+ #endif
+ 
++#define  CONFIG_FIX_ADVLD_LOAD_ADDR
++#define  CONFIG_FIX_MMCSD_BOOT
++#define  CONFIG_FIX_SDMMC_ROOT	"/dev/mmcblk2p4 rootwait rw"	/* sd mmcroot*/
++#define  CONFIG_FIX_SDMMC_BOOTPART	"1"
++#define  CONFIG_ADV_MISC_IO_INIT
+ #define CONFIG_MACH_TYPE	3980
+ #define CONFIG_MXC_UART_BASE	UART1_BASE
+ #define CONFIG_CONSOLE_DEV		"ttymxc1"
+-#define CONFIG_MMCROOT			"/dev/mmcblk0p2"  /* SDHC3 */
++#define CONFIG_MMCROOT			"/dev/mmcblk0p4"  /* emmc mmcroot */
++
++/* MMC support */
++#if defined(CONFIG_SPL_MMC_SUPPORT)
++#define CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_CRC_SECTOR 0x2000 /* address 4M */
++#if defined(CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR)
++#undef	CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR
++#define CONFIG_SYS_MMCSD_RAW_MODE_U_BOOT_SECTOR 0x2001 /* address 8M+512 */
++#endif
++/* #define CONFIG_SYS_MMCSD_FS_BOOT_PARTITION	1 */
++#endif
+ 
+ /* support SATA boot */
+ #define CONFIG_SATA_BOOT
+@@ -91,7 +106,7 @@
+ #define CONFIG_USB_ETHER_ASIX
+ #define CONFIG_MXC_USB_PORTSC		(PORT_PTS_UTMI | PORT_PTS_PTW)
+ #define CONFIG_MXC_USB_FLAGS		0
+-#define CONFIG_USB_MAX_CONTROLLER_COUNT	1 /* Enabled USB controller number */
++#define CONFIG_USB_MAX_CONTROLLER_COUNT	2 /* Enabled USB controller number */
+ #endif
+ 
+ /*#define CONFIG_SPLASH_SCREEN*/
+@@ -149,5 +164,134 @@
+ #define USDHC3_PWREN_GPIO	IMX_GPIO_NR(2, 2)
+ #undef	CONFIG_EMMC_DEV_NUM 
+ #define	CONFIG_EMMC_DEV_NUM		2	/* USDHC4 */
+-#define	CONFIG_CARRIERSD_DEV_NUM	1	/* USDHC3 */		
+-#endif                         /* __MX6QSABRESD_CONFIG_H */
++#define	CONFIG_CARRIERSD_DEV_NUM	1	/* USDHC3 */
++
++/* System Update Series*/
++#ifdef CONFIG_SYS_UPDATE
++
++#define CONFIG_EXT4_NZOFFSET_SUPPORT
++#define CONFIG_UPDATE_EMMC_NUM		CONFIG_EMMC_DEV_NUM
++#define CONFIG_SYS_EMMC_IMAGE_NAME  "emmc_install.img"
++
++/* Overide the default environment variable*/	
++#if !defined(CONFIG_SYS_BOOT_NAND) &&  !defined(CONFIG_SYS_BOOT_SATA)
++
++#define CONFIG_SYSUP_ENV		\
++	"udisk2emmc_update=sysupdate usb 0:1 fat emmc_install.img\0"	\
++	"sdcard2emmc_update=sysupdate sdcard 1:1 ext4 emmc_install.img\0"	\
++	"sdcard2emmc_isupdated=sysupdate test\0"
++
++#undef CONFIG_EXTRA_ENV_SETTINGS
++#define CONFIG_EXTRA_ENV_SETTINGS \
++	CONFIG_MFG_ENV_SETTINGS \
++	"epdc_waveform=epdc_splash.bin\0" \
++	"script=boot.scr\0" \
++	"image=zImage\0" \
++	"fsload=ext4load\0"	\
++	"fdt_file=" CONFIG_DEFAULT_FDT_FILE "\0" \
++	"fdt_addr=0x18000000\0" \
++	"boot_fdt=try\0" \
++	"ip_dyn=yes\0" \
++	"console=" CONFIG_CONSOLE_DEV "\0" \
++	"dfuspi=dfu 0 sf 0:0:10000000:0\0" \
++	"dfu_alt_info_spl=spl raw 0x400\0" \
++	"dfu_alt_info_img=u-boot raw 0x10000\0" \
++	"dfu_alt_info=spl raw 0x400\0" \
++	"fdt_high=0xffffffff\0"	  \
++	"initrd_high=0xffffffff\0" \
++	"mmcdev=" __stringify(CONFIG_SYS_MMC_ENV_DEV) "\0" \
++	"mmcpart=1\0" \
++	"mmcroot=" CONFIG_MMCROOT " rootwait rw\0" \
++	"mmcautodetect=yes\0" \
++	"update_sd_firmware=" \
++		"if test ${ip_dyn} = yes; then " \
++			"setenv get_cmd dhcp; " \
++		"else " \
++			"setenv get_cmd tftp; " \
++		"fi; " \
++		"if mmc dev ${mmcdev}; then "	\
++			"if ${get_cmd} ${update_sd_firmware_filename}; then " \
++				"setexpr fw_sz ${filesize} / 0x200; " \
++				"setexpr fw_sz ${fw_sz} + 1; "	\
++				"mmc write ${loadaddr} 0x2 ${fw_sz}; " \
++			"fi; "	\
++		"fi\0" \
++	EMMC_ENV	  \
++	CONFIG_SYSUP_ENV	\
++	"smp=" CONFIG_SYS_NOSMP "\0"\
++	"mmcargs=setenv bootargs console=${console},${baudrate} ${smp} " \
++		"root=${mmcroot} ${bootargs}\0" \
++	"loadbootscript=" \
++		"${fsload} mmc ${mmcdev}:${mmcpart} ${loadaddr} ${script};\0" \
++	"bootscript=echo Running bootscript from mmc ...; " \
++		"source\0" \
++	"loadimage=${fsload} mmc ${mmcdev}:${mmcpart} ${loadaddr} ${image}\0" \
++	"loadfdt=${fsload} mmc ${mmcdev}:${mmcpart} ${fdt_addr} ${fdt_file}\0" \
++	"mmcboot=echo Booting from mmc ...; " \
++		"run mmcargs; " \
++		"if test ${boot_fdt} = yes || test ${boot_fdt} = try; then " \
++			"if run loadfdt; then " \
++				"bootz ${loadaddr} - ${fdt_addr}; " \
++			"else " \
++				"if test ${boot_fdt} = try; then " \
++					"bootz; " \
++				"else " \
++					"echo WARN: Cannot load the DT; " \
++				"fi; " \
++			"fi; " \
++		"else " \
++			"bootz; " \
++		"fi;\0" \
++	"netargs=setenv bootargs console=${console},${baudrate} ${smp} " \
++		"root=/dev/nfs " \
++		"ip=dhcp nfsroot=${serverip}:${nfsroot},v3,tcp\0" \
++	"netboot=echo Booting from net ...; " \
++		"run netargs; " \
++		"if test ${ip_dyn} = yes; then " \
++			"setenv get_cmd dhcp; " \
++		"else " \
++			"setenv get_cmd tftp; " \
++		"fi; " \
++		"${get_cmd} ${image}; " \
++		"if test ${boot_fdt} = yes || test ${boot_fdt} = try; then " \
++			"if ${get_cmd} ${fdt_addr} ${fdt_file}; then " \
++				"bootz ${loadaddr} - ${fdt_addr}; " \
++			"else " \
++				"if test ${boot_fdt} = try; then " \
++					"bootz; " \
++				"else " \
++					"echo WARN: Cannot load the DT; " \
++				"fi; " \
++			"fi; " \
++		"else " \
++			"bootz; " \
++		"fi;\0"
++/* undefine CONFIG_BOOTCOMMAND and redefine it */
++#undef CONFIG_BOOTCOMMAND
++#define CONFIG_BOOTCOMMAND \
++	"if run udisk2emmc_update; then "	\
++		"if run sdcard2emmc_update; then "	\
++			"if run sdcard2emmc_isupdated; then "	\
++				"echo blanking led; "	\
++			"else "	\
++				"mmc dev ${mmcdev}; " \
++				"if mmc rescan; then " \
++					"if run loadbootscript; then " \
++						"run bootscript; " \
++					"else " \
++						"if run loadimage; then " \
++							"run mmcboot; " \
++						"else run netboot; " \
++						"fi; " \
++					"fi; " \
++				"else run netboot; fi; "	\
++			"fi; "	\
++		"else "	\
++			"echo system update failed!; "	\
++		"fi; "	\
++	"else "	\
++		"echo system update failed!; fi "	
++
++#endif  /* !defined(CONFIG_SYS_BOOT_NAND) &&  !defined(CONFIG_SYS_BOOT_SATA) */
++#endif	/*CONFIG_SYS_UPDATE*/
++#endif  /* __MX6QSABRESD_CONFIG_H */
